@@ -1429,6 +1429,16 @@ var histTo='';
 var supabase=null;
 var syncEnabled=false;
 var firstSyncDone=false;
+/* IDs excluídos: impedem que o valor "volte" do servidor */
+var DELETED_KEY='transactions_deleted_'+(typeof STORAGE_KEY==='string'?STORAGE_KEY.replace(/^transactions_/,''):'');
+var deletedIds={};
+function loadDeleted(){
+  try{ var raw=localStorage.getItem(DELETED_KEY); deletedIds=raw?JSON.parse(raw):{}; if(!deletedIds||typeof deletedIds!=='object')deletedIds={}; }catch(e){ deletedIds={}; }
+}
+function saveDeleted(){
+  try{ localStorage.setItem(DELETED_KEY,JSON.stringify(deletedIds)); }catch(e){}
+}
+
 var lastSync=null;
 
 function initSupabase(){
@@ -1454,6 +1464,7 @@ function setupRealtimeSync(){
     .on('postgres_changes',{event:'*',schema:'public',table:'transactions'},function(payload){
       if(payload.eventType==='INSERT'||payload.eventType==='UPDATE'){
         var newTx=payload.new;
+        if(deletedIds[String(newTx.id)])return; /* foi excluído: ignora */
         var idx=transactions.findIndex(function(t){return String(t.id)===String(newTx.id);});
         if(idx>=0){
           transactions[idx]=normalizeTx(newTx);
@@ -1531,14 +1542,26 @@ async function syncToServer(){
       merged.push(t);
     });
 
+    /* nunca ressuscita o que foi excluído */
+    if(Object.keys(deletedIds).length){
+      merged=merged.filter(function(t){return !deletedIds[String(t.id)];});
+    }
     if(!firstSyncDone){
       serverTx.forEach(function(t){
-        if(!localIds[String(t.id)]){
+        if(!localIds[String(t.id)] && !deletedIds[String(t.id)]){
           merged.push(normalizeTx(t));
           localIds[String(t.id)]=true;
         }
       });
     }
+
+    /* tenta apagar no servidor os que ficaram pendentes */
+    var pend=Object.keys(deletedIds);
+    for(var d=0;d<pend.length;d++){
+      var delRes=await supabase.from('transactions').delete().eq('id',String(pend[d])).select('id');
+      if(!delRes.error){ delete deletedIds[pend[d]]; }
+    }
+    if(pend.length) saveDeleted();
 
     /* envia pro servidor os locais que não estão lá */
     for(var i=0;i<transactions.length;i++){
@@ -2565,16 +2588,27 @@ $('txList').addEventListener('click',function(e){
   if(!btn)return;
   var id=btn.dataset.id;
   if(confirm('Excluir esta entrada?')){
+    var alvo=transactions.find(function(t){return String(t.id)===String(id);});
+    var idx=transactions.findIndex(function(t){return String(t.id)===String(id);});
+
+    /* remove localmente e re-renderiza já (resposta rápida) */
     transactions=transactions.filter(function(t){return String(t.id)!==String(id);});
+    deletedIds[String(id)]=true; saveDeleted();
     store.saveLocal();
-    /* envia DELETE pro Supabase */
-    if(syncEnabled&&supabase){
-      supabase.from('transactions').delete().eq('id',String(id)).then(function(res){
-        if(res.error&&window.console)console.error('Erro ao excluir no Supabase:',res.error);
-      });
-    }
     renderAll();
     toast('Entrada excluída');
+
+    /* envia DELETE pro Supabase e CONFIRMA se apagou de verdade.
+       Sem .select() o Supabase devolve "sucesso" mesmo apagando 0 linhas
+       (é o que acontece quando a permissão do banco bloqueia). */
+    if(syncEnabled&&supabase){
+      supabase.from('transactions').delete().eq('id',String(id)).select('id').then(function(res){
+        var apagou = !res.error && res.data && res.data.length>0;
+        if(apagou){ delete deletedIds[String(id)]; saveDeleted(); return; }
+        /* não apagou no banco: fica na lista de apagados e será retentado */
+        if(window.console)console.error('Exclusão pendente no servidor:',res.error||res.data);
+      });
+    }
   }
 });
 
@@ -3094,6 +3128,7 @@ function init(){
   $('todayPill').textContent=WEEKDAYS[now.getDay()]+' · '+now.getDate()+' '+MONTHS[now.getMonth()];
   $('data').value=iso(now);
 
+  loadDeleted();
   loadPrivacy();
   if(privacy){
     var pb=$('privacyBtn');
