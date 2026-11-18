@@ -1434,8 +1434,8 @@ function initSupabase(){
   if(typeof window.supabase==='undefined')return;
   try{
     /* Configure somente com as credenciais Supabase exclusivas deste cliente. */
-    var clienteSupabaseUrl=''; // Cole a URL do projeto Supabase do MONKEY POKAS IDEIAS
-    var clienteSupabaseAnonKey=''; // Cole a chave anon do projeto Supabase do MONKEY POKAS IDEIAS
+    var clienteSupabaseUrl='https://kztdikbxumtshszjxuxl.supabase.co'; // URL do projeto Supabase deste cliente
+    var clienteSupabaseAnonKey='sb_publishable_wOzcal1S1B5G7cTlIIdWGA_QGd1OgLT'; // chave pública do projeto Supabase deste cliente
     if(!clienteSupabaseUrl||!clienteSupabaseAnonKey)return;
     supabase=window.supabase.createClient(clienteSupabaseUrl,clienteSupabaseAnonKey);
     syncEnabled=true;
