@@ -811,7 +811,7 @@ input:focus-visible,select:focus-visible{outline:none}
       <svg class="ic-eye-off" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><path d="M14.12 14.12a3 3 0 1 1-4.24-4.24"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
     </button>
     <div class="today-pill" id="todayPill"></div>
-    <div id="appVersion" style="font:700 10px var(--font-ui);color:#FF7A70;border:1px solid rgba(255,122,112,.4);border-radius:999px;padding:3px 8px">v3</div>
+    <div id="appVersion" style="font:700 10px var(--font-ui);color:#FF7A70;border:1px solid rgba(255,122,112,.4);border-radius:999px;padding:3px 8px">v4</div>
   </div>
 </header>
 
@@ -1531,92 +1531,82 @@ async function syncToServer(){
     var serverTx=txRes.data||[];
     var serverPux=puxRes.data||[];
 
-    /* MESCLA: na PRIMEIRA carga, traz do servidor o que não existe no local.
-       Nas demais, NÃO re-adiciona o que foi excluído localmente (o tempo real
-       já sincroniza adições/edições/exclusões nos dois lados). */
-    var localIds={};
-    var merged=[];
+    /* ---------- SINCRONIZAÇÃO REAL ----------
+       O SERVIDOR é a fonte da verdade. Os "túmulos" (ids excluídos, guardados
+       na tabela deleted_ids) evitam que outro aparelho ressuscite o que foi
+       apagado. Sem isso, o celular reenviava o que o PC tinha excluído. */
 
-    /* adiciona todos os locais primeiro */
-    transactions.forEach(function(t){
-      localIds[String(t.id)]=true;
-      merged.push(t);
+    /* 1) pega os túmulos do servidor */
+    var tombRes=await supabase.from('deleted_ids').select('id');
+    var serverTombs={};
+    if(!tombRes.error && tombRes.data){
+      tombRes.data.forEach(function(r){ serverTombs[String(r.id)]=true; });
+    }
+
+    /* 2) junta os túmulos locais + servidor */
+    var allTombs={};
+    Object.keys(deletedIds).forEach(function(k){ allTombs[k]=true; });
+    Object.keys(serverTombs).forEach(function(k){ allTombs[k]=true; });
+    /* sobe para o servidor os túmulos que ainda não estão lá */
+    var toPush=Object.keys(deletedIds).filter(function(k){ return !serverTombs[k]; });
+    for(var tp=0;tp<toPush.length;tp++){
+      await supabase.from('deleted_ids').upsert({id:String(toPush[tp])},{onConflict:'id'});
+    }
+
+    /* 3) remove do servidor tudo que está marcado como excluído */
+    for(var dd=0;dd<Object.keys(allTombs).length;dd++){}
+    var tombKeys=Object.keys(allTombs);
+    for(var tk=0;tk<tombKeys.length;tk++){
+      await supabase.from('transactions').delete().eq('id',String(tombKeys[tk]));
+      await supabase.from('puxadas').delete().eq('id',String(tombKeys[tk]));
+    }
+
+    /* 4) monta a lista final: servidor SEM os túmulos (+ locais ainda não enviados) */
+    var merged=[];
+    var seen={};
+    serverTx.forEach(function(t){
+      var id=String(t.id);
+      if(allTombs[id]||seen[id])return;
+      seen[id]=true;
+      merged.push(normalizeTx(t));
     });
 
-    /* nunca ressuscita o que foi excluído */
-    if(Object.keys(deletedIds).length){
-      merged=merged.filter(function(t){return !deletedIds[String(t.id)];});
-    }
-    if(!firstSyncDone){
-      serverTx.forEach(function(t){
-        if(!localIds[String(t.id)] && !deletedIds[String(t.id)]){
-          merged.push(normalizeTx(t));
-          localIds[String(t.id)]=true;
-        }
-      });
-    }
-
-    /* tenta apagar no servidor os que ficaram pendentes */
-    var pend=Object.keys(deletedIds);
-    for(var d=0;d<pend.length;d++){
-      var delRes=await supabase.from('transactions').delete().eq('id',String(pend[d])).select('id');
-      if(!delRes.error){ delete deletedIds[pend[d]]; }
-    }
-    if(pend.length) saveDeleted();
-
-    /* envia pro servidor os locais que não estão lá */
+    /* 5) locais que são NOVOS (criados neste aparelho e ainda não enviados)
+          e não estão marcados como excluídos */
     for(var i=0;i<transactions.length;i++){
-      var t=transactions[i];
-      var existsOnServer=serverTx.some(function(st){return String(st.id)===String(t.id);});
-      if(!existsOnServer){
-        var res=await supabase.from('transactions').insert({
-          id:String(t.id),
-          valor:t.valor,
-          descricao:t.descricao,
-          ficheiro:t.ficheiro,
-          data:t.data,
-          pago:t.pago,
-          percentuais:t.percentuais,
-          valores:t.valores,
-          observacao:t.observacao
-        });
-        if(res.error&&window.console)console.error('Erro ao inserir transação:',res.error);
-      }
+      var t=transactions[i], tid=String(t.id);
+      if(allTombs[tid]||seen[tid])continue;
+      seen[tid]=true;
+      merged.push(t);
+      var res=await supabase.from('transactions').insert({
+        id:tid, valor:t.valor, descricao:t.descricao, ficheiro:t.ficheiro,
+        data:t.data, pago:t.pago, percentuais:t.percentuais,
+        valores:t.valores, observacao:t.observacao
+      });
+      if(res.error&&window.console)console.error('Erro ao inserir transação:',res.error);
     }
 
     transactions=merged;
     localStorage.setItem(STORAGE_KEY,JSON.stringify(transactions));
 
     /* mesmo processo para puxadas */
-    var localPuxIds={};
     var mergedPux=[];
-
-    puxEntries.forEach(function(p){
-      localPuxIds[String(p.id)]=true;
+    var seenPux={};
+    serverPux.forEach(function(p){
+      var id=String(p.id);
+      if(allTombs[id]||seenPux[id])return;
+      seenPux[id]=true;
       mergedPux.push(p);
     });
-
-    if(!firstSyncDone){
-      serverPux.forEach(function(p){
-        if(!localPuxIds[String(p.id)]){
-          mergedPux.push(p);
-          localPuxIds[String(p.id)]=true;
-        }
-      });
-    }
-
     for(var j=0;j<puxEntries.length;j++){
-      var p=puxEntries[j];
-      var existsOnServerPux=serverPux.some(function(sp){return String(sp.id)===String(p.id);});
-      if(!existsOnServerPux){
-        var puxRes2=await supabase.from('puxadas').insert({
-          id:String(p.id),
-          pessoa:p.pessoa,
-          valor:p.valor,
-          semana:p.semana
-        });
-        if(puxRes2.error&&window.console)console.error('Erro ao inserir puxada:',puxRes2.error);
-      }
+      var p=puxEntries[j], pid=String(p.id);
+      if(allTombs[pid]||seenPux[pid])continue;
+      seenPux[pid]=true;
+      mergedPux.push(p);
+      var puxRes2=await supabase.from('puxadas').insert({
+        id:pid, pessoa:p.pessoa, valor:p.valor, semana:p.semana
+      });
+      if(puxRes2.error&&window.console)console.error('Erro ao inserir puxada:',puxRes2.error);
     }
 
     puxEntries=mergedPux;
@@ -2599,15 +2589,15 @@ $('txList').addEventListener('click',function(e){
     renderAll();
     toast('Entrada excluída');
 
-    /* envia DELETE pro Supabase e CONFIRMA se apagou de verdade.
-       Sem .select() o Supabase devolve "sucesso" mesmo apagando 0 linhas
-       (é o que acontece quando a permissão do banco bloqueia). */
+    /* grava o "túmulo" na NUVEM e apaga de lá.
+       O túmulo é o que impede o outro aparelho (celular) de reenviar
+       este lançamento de volta para o servidor. */
     if(syncEnabled&&supabase){
-      supabase.from('transactions').delete().eq('id',String(id)).select('id').then(function(res){
-        var apagou = !res.error && res.data && res.data.length>0;
-        if(apagou){ delete deletedIds[String(id)]; saveDeleted(); return; }
-        /* não apagou no banco: fica na lista de apagados e será retentado */
-        if(window.console)console.error('Exclusão pendente no servidor:',res.error||res.data);
+      supabase.from('deleted_ids').upsert({id:String(id)},{onConflict:'id'}).then(function(tomb){
+        if(tomb.error&&window.console)console.error('Erro ao gravar exclusão:',tomb.error);
+        supabase.from('transactions').delete().eq('id',String(id)).then(function(res){
+          if(res.error&&window.console)console.error('Erro ao excluir no servidor:',res.error);
+        });
       });
     }
   }
