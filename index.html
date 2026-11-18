@@ -1428,6 +1428,7 @@ var histTo='';
 /* ---------- Supabase ---------- */
 var supabase=null;
 var syncEnabled=false;
+var firstSyncDone=false;
 var lastSync=null;
 
 function initSupabase(){
@@ -1518,7 +1519,9 @@ async function syncToServer(){
     var serverTx=txRes.data||[];
     var serverPux=puxRes.data||[];
 
-    /* MESCLA INTELIGENTE: combina local + servidor, sem perder nada */
+    /* MESCLA: na PRIMEIRA carga, traz do servidor o que não existe no local.
+       Nas demais, NÃO re-adiciona o que foi excluído localmente (o tempo real
+       já sincroniza adições/edições/exclusões nos dois lados). */
     var localIds={};
     var merged=[];
 
@@ -1528,12 +1531,14 @@ async function syncToServer(){
       merged.push(t);
     });
 
-    /* adiciona do servidor o que NÃO está no local */
-    serverTx.forEach(function(t){
-      if(!localIds[String(t.id)]){
-        merged.push(normalizeTx(t));
-      }
-    });
+    if(!firstSyncDone){
+      serverTx.forEach(function(t){
+        if(!localIds[String(t.id)]){
+          merged.push(normalizeTx(t));
+          localIds[String(t.id)]=true;
+        }
+      });
+    }
 
     /* envia pro servidor os locais que não estão lá */
     for(var i=0;i<transactions.length;i++){
@@ -1567,11 +1572,14 @@ async function syncToServer(){
       mergedPux.push(p);
     });
 
-    serverPux.forEach(function(p){
-      if(!localPuxIds[String(p.id)]){
-        mergedPux.push(p);
-      }
-    });
+    if(!firstSyncDone){
+      serverPux.forEach(function(p){
+        if(!localPuxIds[String(p.id)]){
+          mergedPux.push(p);
+          localPuxIds[String(p.id)]=true;
+        }
+      });
+    }
 
     for(var j=0;j<puxEntries.length;j++){
       var p=puxEntries[j];
@@ -1589,6 +1597,8 @@ async function syncToServer(){
 
     puxEntries=mergedPux;
     localStorage.setItem(PUX_KEY,JSON.stringify(puxEntries));
+
+    firstSyncDone=true;
 
     renderAll();
     renderPux();
